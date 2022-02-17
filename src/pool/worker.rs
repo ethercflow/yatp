@@ -39,6 +39,8 @@ where
     }
 
     pub fn run(mut self) {
+        self.local.might_sleep();
+
         self.runner.start(&mut self.local);
         while !self.local.core().is_shutdown() {
             let task = match self.pop() {
@@ -46,6 +48,7 @@ where
                 None => continue,
             };
             self.runner.handle(&mut self.local, task.task_cell);
+            self.local.might_sleep();
         }
         self.runner.end(&mut self.local);
 

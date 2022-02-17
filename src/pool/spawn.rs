@@ -138,15 +138,34 @@ impl<T> QueueCore<T> {
     }
 
     /// Scale workers.
-    pub fn scale_workers(&self, new_thread_count: usize) -> bool {
+    pub fn scale_workers(&self, new_thread_count: usize, source: usize) -> bool {
         if new_thread_count < self.config.min_thread_count
             || new_thread_count > self.config.max_thread_count
         {
             return false;
         }
-        self.config
+        let core_thread_count = self
+            .config
             .core_thread_count
-            .store(new_thread_count, Ordering::SeqCst);
+            .swap(new_thread_count, Ordering::SeqCst);
+        let mut gaps = (new_thread_count - core_thread_count) as isize;
+        if gaps > 0 {
+            let addr = self as *const QueueCore<T> as usize;
+            unsafe {
+                parking_lot_core::unpark_filter(
+                    addr,
+                    |p: ParkToken| {
+                        if gaps > 0 && p.0 <= new_thread_count {
+                            gaps -= 1;
+                            FilterOp::Unpark
+                        } else {
+                            FilterOp::Skip
+                        }
+                    },
+                    |_| UnparkToken(source),
+                );
+            }
+        }
         true
     }
 }
@@ -186,7 +205,7 @@ impl<T: TaskCell + Send> Remote<T> {
 
     /// Scales workers of the thread pool.
     pub fn scale_workers(&self, new_thread_count: usize) -> bool {
-        self.core.scale_workers(new_thread_count)
+        self.core.scale_workers(new_thread_count, 0)
     }
 
     pub(crate) fn stop(&self) {
@@ -318,6 +337,35 @@ impl<T: TaskCell + Send> Local<T> {
             ParkResult::Unparked(_) | ParkResult::Invalid => {
                 self.core.mark_woken();
                 task
+            }
+            ParkResult::TimedOut => unreachable!(),
+        }
+    }
+
+    /// Go to sleep if it is not in the current scheduling domain.
+    ///
+    /// If its id is greater than core_thread_count, it means it is not in the
+    /// current scheduling domain. It will go to sleep and not wake up until it
+    /// is included in the new scheduling domain after scaling up or shutdown.
+    pub(crate) fn might_sleep(&mut self) {
+        if self.id <= self.core.config.core_thread_count.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let address = &*self.core as *const QueueCore<T> as usize;
+        let res = unsafe {
+            parking_lot_core::park(
+                address,
+                || self.core.mark_sleep(),
+                || {},
+                |_, _| {},
+                ParkToken(self.id),
+                None,
+            )
+        };
+        match res {
+            ParkResult::Unparked(_) | ParkResult::Invalid => {
+                self.core.mark_woken();
             }
             ParkResult::TimedOut => unreachable!(),
         }

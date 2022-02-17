@@ -34,8 +34,8 @@ impl<T: TaskCell + Send> ThreadPool<T> {
         self.remote.spawn(t);
     }
 
-    /// Scale workers of the thread pool, the new thread count should be
-    /// smaller than the max_thread_count, otherwise it will become no-op
+    /// Scale workers of the thread pool, the new thread count should be less
+    /// than or euqal to the max_thread_count, otherwise it will become no-op
     /// and return false.
     ///
     /// If the pool is shutdown, it becomes no-op.
